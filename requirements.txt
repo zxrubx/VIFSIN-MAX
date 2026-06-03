@@ -1,3 +1,2 @@
-# Add your dependencies here
-# Example:
-# requests==2.31.0
+maxapi
+python-dotenv
