@@ -53,10 +53,4 @@ secrets/
 credentials/
 
 # Reference SDK repos (not part of this project)
-max-bot-api-client-go-main/
-max-bot-api-client-ts-main/
-max-bot-example-todolist-main/
-max-botapi-python-main/
-max-ui-main/
-cursant-report-v1-main/
-student-report-system-main/
+references/
