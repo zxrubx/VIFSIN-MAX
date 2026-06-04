@@ -1,2 +1,4 @@
 maxapi
 python-dotenv
+fastapi
+uvicorn[standard]

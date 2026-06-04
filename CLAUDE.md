@@ -1,186 +1,120 @@
-# Bot MAX Institute — Project Context
+# Bot MAX Institute — сбор обратной связи
 
-## О проекте
-Бот для мессенджера MAX (max.ru). Написан на Python с использованием библиотеки `maxapi`.
+## Что это
+Бот в мессенджере MAX для приёма обращений студентов: жалобы, вопросы, конфликты. Хранит обращения в SQLite. Админ-панель на FastAPI для модерации.
 
-## Установка
+## Стек
+- `maxapi` — клиент MAX Bot API (polling)
+- `sqlite3` — хранение обращений (без ORM, минимум зависимостей)
+- `fastapi` + `uvicorn` — админ-панель с HTTP Basic Auth
+- `python-dotenv` — конфиг через `.env`
+
+## Структура
+
+```
+bot/
+├── main.py              # точка входа, polling
+├── config.py            # читает .env (BOT_TOKEN, DB_PATH, ADMIN_*)
+├── db.py                # SQLite: init_db, create_report, list_reports, update_status
+└── handlers/
+    ├── start.py         # /start, /help
+    └── feedback.py      # /report — FSM: категория → описание → контакт
+
+admin/
+└── app.py               # FastAPI: список обращений, фильтр по статусу, действия
+
+data/                    # SQLite БД (создаётся автоматически, в .gitignore)
+```
+
+## Модель данных
+
+Таблица `reports`:
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `id` | TEXT PK | 8-символьный hex (например `A3F9B21C`) |
+| `user_id` | INTEGER | MAX user_id отправителя |
+| `category` | TEXT | одна из 5 категорий (см. `db.CATEGORIES`) |
+| `description` | TEXT | текст обращения |
+| `contact_info` | TEXT NULL | контакт или NULL (анонимно) |
+| `status` | TEXT | `pending` / `approved` / `rejected` / `resolved` |
+| `created_at` | TEXT | ISO timestamp |
+| `reviewed_at` | TEXT NULL | время последней смены статуса |
+
+Категории заданы списком в `bot/db.py:CATEGORIES`. Статусы — `bot/db.py:STATUSES`.
+
+## Поток сбора обратной связи
+
+`/report` → inline-кнопки с категориями → `MemoryContext` ставит state `report_description` → пользователь шлёт текст → state `report_contact` → пользователь шлёт контакт или `-` → запись в БД, ID возвращается пользователю.
+
+`/cancel` сбрасывает состояние на любом шаге.
+
+## Запуск
 
 ```bash
-pip install maxapi
-# с поддержкой вебхуков:
-pip install maxapi[webhook]
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env       # вставить BOT_TOKEN и ADMIN_PASSWORD
+
+# бот (polling)
+python -m bot.main
+
+# админка (отдельный процесс)
+uvicorn admin.app:app --host 127.0.0.1 --port 8000
+# открыть http://127.0.0.1:8000  (логин admin, пароль из ADMIN_PASSWORD)
 ```
 
-## Аутентификация и базовый URL
+## Аутентификация и URL MAX API
 
 - **Base URL:** `https://botapi.max.ru`
-- **Токен** получается через `@MasterBot` в мессенджере MAX
-- Токен передаётся один раз при создании `Bot('token')` и автоматически добавляется ко всем запросам как `?access_token=<token>`
-- Токен хранить в `.env` файле, не коммитить
+- Токен берётся через `@MasterBot` в MAX, кладётся в `.env` (`BOT_TOKEN`)
+- Все запросы автоматически дополняются `?access_token=<token>`
 
-## Структура проекта
+## Ключевые паттерны maxapi
 
-```
-bot/        # основной код бота
-config/     # конфигурация
-tests/      # тесты
-```
-
-## Шаблон бота (polling)
-
+### Шаблон handler-а
 ```python
-import asyncio
-from maxapi import Bot, Dispatcher
-from maxapi.types import BotStarted, MessageCreated, Command
-
-bot = Bot('your_token')
-dp = Dispatcher()
-
-@dp.bot_started()
-async def on_start(event: BotStarted):
-    await event.bot.send_message(chat_id=event.chat_id, text='Привет!')
-
-@dp.message_created(Command('start'))
-async def cmd_start(event: MessageCreated):
-    await event.message.answer('Запущен!')
-
-async def main():
-    await dp.start_polling(bot)
-
-asyncio.run(main())
+@dp.message_created(Command('report'))
+async def cmd_report(event: MessageCreated, context: MemoryContext):
+    await context.set_state('report_description')
+    await event.message.answer('Опишите проблему:')
 ```
 
-## Ключевые типы событий (UpdateType)
-
-| Тип | Описание |
-|---|---|
-| `MessageCreated` | Новое сообщение |
-| `MessageEdited` | Редактирование сообщения |
-| `MessageRemoved` | Удаление сообщения |
-| `MessageCallback` | Нажатие inline-кнопки |
-| `BotStarted` | Пользователь нажал Start |
-| `BotStopped` | Пользователь остановил бота |
-| `BotAdded` / `BotRemoved` | Бот добавлен/удалён из чата |
-| `UserAdded` / `UserRemoved` | Пользователь добавлен/удалён |
-| `ChatTitleChanged` | Изменён заголовок чата |
-
-## Отправка сообщений
-
-```python
-# Полная версия
-await bot.send_message(chat_id=123, text='Текст', parse_mode=ParseMode.MARKDOWN)
-
-# Внутри обработчика (предпочтительно)
-await event.message.answer('Ответ')        # в тот же чат
-await event.message.reply('Цитата')        # с цитированием
-await event.message.edit('Новый текст')
-await event.message.delete()
-await event.message.pin()
-```
-
-## Фильтры и команды
-
-```python
-from maxapi import F
-from maxapi.types import Command, CommandStart
-
-@dp.message_created(Command('help'))        # /help
-@dp.message_created(CommandStart())         # /start
-@dp.message_created(F.message.body.text == 'привет')
-@dp.message_created(F.message.body.text.lower().contains('help'))
-@dp.message_created(F.message.body.attachments)   # есть вложения
-```
-
-## Inline-клавиатуры и callback
-
+### Inline-кнопки и callback
 ```python
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
-from maxapi.types import CallbackButton, LinkButton
-from maxapi.enums import Intent
+from maxapi.types import CallbackButton
 
 builder = InlineKeyboardBuilder()
-builder.row(
-    CallbackButton(text='Удалить', payload='delete:123', intent=Intent.NEGATIVE),
-    LinkButton(text='Сайт', url='https://example.com'),
-)
+builder.row(CallbackButton(text='Категория', payload='cat:0'))
 await event.message.answer(text='Выберите:', attachments=[builder.as_markup()])
 
-# Обработка нажатия
 @dp.message_callback()
-async def on_callback(event: MessageCallback):
-    record_id, action = event.callback.payload.split(':')
-    await event.answer(notification='Готово!', new_text='Обновлено')
+async def on_cb(event: MessageCallback):
+    await event.answer(notification='Принято')
 ```
 
-**Паттерн кодирования payload:** `f"{id}:{action}"` (например `"42:delete"`)
+Payload формат: `f"{key}:{value}"` (например `"cat:3"`).
 
-## FSM (состояния)
-
+### FSM (MemoryContext)
 ```python
-from maxapi.context import MemoryContext
-
-@dp.message_created(Command('create'))
-async def ask(event: MessageCreated, context: MemoryContext):
-    await context.set_state('waiting_input')
-    await event.message.answer('Введите текст:')
-
-@dp.message_created(states=['waiting_input'])
-async def receive(event: MessageCreated, context: MemoryContext):
+@dp.message_created(states=['report_description'])
+async def step(event: MessageCreated, context: MemoryContext):
     text = event.message.body.text
-    await context.clear()
-    await event.message.answer(f'Получено: {text}')
+    await context.update_data(description=text)
+    await context.set_state('report_contact')
 ```
 
-`MemoryContext` — in-memory, не переживает рестарт. Идентифицируется по `(chat_id, user_id)`.
+`MemoryContext` живёт в RAM. Идентифицируется парой `(chat_id, user_id)`. При рестарте теряется — для production стоит подключить Redis-backed state.
 
-## Роутеры
-
-```python
-from maxapi import Router
-
-router = Router(router_id='module_name')
-
-@router.message_created(Command('help'))
-async def help_cmd(event: MessageCreated):
-    await event.message.answer('Помощь')
-
-dp.include_routers(router)
-```
-
-## Вебхуки
-
-```python
-# Запуск вебхук-сервера (fastapi + uvicorn)
-await dp.handle_webhook(bot=bot, host='0.0.0.0', port=8080)
-
-# Перед стартом polling — удалить существующие вебхуки
-await bot.delete_webhook()
-await dp.start_polling(bot)
-```
-
-Разрешённые порты для вебхуков: **80, 8080, 443, 8443, 16384–32383**
-
-## Загрузка медиафайлов
-
-```python
-from maxapi.types.input_media import InputMedia, InputMediaBuffer
-
-attachment = InputMedia('/path/to/file.jpg')           # с диска
-attachment = InputMediaBuffer(buffer=bytes, filename='photo.jpg')  # из байтов
-
-await bot.send_message(chat_id=chat_id, text='Файл', attachments=[attachment])
-```
-
-После загрузки файла библиотека делает паузу 2 секунды (настраивается: `Bot(after_input_media_delay=2.0)`).
-
-## Ключевые типы данных
-
-- `message_id` (`mid`) — **строка (str)**
-- `chat_id`, `user_id` — **целые числа (int)**
-- `timestamp` — unix time в миллисекундах
+## Типы данных
+- `message_id` (`mid`) — **str**
+- `chat_id`, `user_id` — **int**
+- `timestamp` — unix-time в миллисекундах
 
 ## Важные нюансы
-
-- Polling и вебхуки **несовместимы** одновременно
-- `auto_requests=True` на `Bot` делает дополнительные API-запросы для обогащения `event.from_user` и `event.chat` — отключи если не нужно
-- `RequestGeoLocationButton` и тип кнопки "chat" имеют проблемы на стороне MAX API
+- Polling и вебхуки несовместимы — `bot.delete_webhook()` вызывается перед `start_polling`
+- В админке используется HTTP Basic Auth (один пользователь `admin` + пароль из env). Для multi-user — добавить полноценные сессии
+- БД-файл создаётся в `data/reports.db` при первом запуске
+- `RequestGeoLocationButton` и кнопка типа `chat` нестабильны на стороне MAX API

@@ -1,16 +1,11 @@
-# Bot Max Institute
+# Bot MAX Institute
 
-Бот для мессенджера Max.
+Бот в мессенджере MAX для приёма обратной связи от студентов с админ-панелью для модерации.
 
-## Структура проекта
-
-```
-bot_max_institute/
-├── bot/              # Основной код бота
-├── config/           # Конфигурация
-├── tests/            # Тесты
-└── requirements.txt  # Зависимости Python
-```
+## Возможности
+- Сбор обращений по категориям через диалог в боте
+- Хранение в SQLite
+- Веб-панель для просмотра и обработки обращений (одобрить / отклонить / отметить решённым)
 
 ## Установка
 
@@ -18,10 +13,30 @@ bot_max_institute/
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
+
+В `.env` укажите:
+- `BOT_TOKEN` — токен из `@MasterBot` в мессенджере MAX
+- `ADMIN_PASSWORD` — пароль для админ-панели
 
 ## Запуск
 
+Бот (polling):
 ```bash
-python bot/main.py
+python -m bot.main
 ```
+
+Админ-панель (в другом терминале):
+```bash
+uvicorn admin.app:app --host 127.0.0.1 --port 8000
+```
+
+Откройте http://127.0.0.1:8000 — логин `admin`, пароль из `ADMIN_PASSWORD`.
+
+## Использование бота
+
+- `/start` — приветствие и список команд
+- `/report` — оставить обращение (бот спросит категорию, описание, контакт)
+- `/cancel` — отменить ввод
+- `/help` — помощь
