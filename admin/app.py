@@ -1,16 +1,28 @@
 import secrets
+from contextlib import asynccontextmanager
 from html import escape
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from bot.config import ADMIN_PASSWORD
-from bot.db import init_db, list_reports, update_status, STATUSES
+from bot import config
+from bot.db import init_db, list_reports, get_report, count_by_status, update_status, STATUSES
+from bot.notify import send_text, status_changed_text
 
-app = FastAPI(title='Reports Admin')
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # админка с дефолтным паролем — это открытая дверь к жалобам студентов
+    if config.ADMIN_PASSWORD in config.WEAK_PASSWORDS:
+        raise RuntimeError('ADMIN_PASSWORD не задан или слишком простой — укажите надёжный пароль в .env')
+    init_db()
+    yield
+
+
+app = FastAPI(title='Reports Admin', lifespan=lifespan)
 security = HTTPBasic()
-init_db()
 
 STATUS_LABELS = {
     'pending': 'Ожидает',
@@ -22,25 +34,25 @@ STATUS_LABELS = {
 
 def auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:
     ok = (
-        secrets.compare_digest(credentials.username, 'admin')
-        and secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+        secrets.compare_digest(credentials.username.encode(), b'admin')
+        and secrets.compare_digest(credentials.password.encode(), config.ADMIN_PASSWORD.encode())
     )
     if not ok:
         raise HTTPException(401, 'Unauthorized', headers={'WWW-Authenticate': 'Basic'})
     return credentials.username
 
 
-def render(reports: list[dict], current: str) -> str:
+def render(reports: list[dict], current: str, counts: dict[str, int]) -> str:
     rows = ''
     for r in reports:
         contact = escape(r['contact_info'] or '—')
         rows += f'''
             <tr>
-                <td><code>{r['id']}</code></td>
+                <td><code>{escape(r['id'])}</code></td>
                 <td>{escape(r['category'])}</td>
                 <td class="desc">{escape(r['description'])}</td>
                 <td>{contact}</td>
-                <td>{r['user_id'] or '—'}</td>
+                <td>{r['user_id'] or 'аноним'}</td>
                 <td><span class="s s-{r['status']}">{STATUS_LABELS.get(r['status'], r['status'])}</span></td>
                 <td>{r['created_at'][:19].replace('T', ' ')}</td>
                 <td class="actions">
@@ -52,9 +64,10 @@ def render(reports: list[dict], current: str) -> str:
         '''
 
     filters = ''
-    for s, label in [('all', 'Все'), *[(s, STATUS_LABELS[s]) for s in STATUSES]]:
+    total = sum(counts.values())
+    for s, label, n in [('all', 'Все', total), *[(s, STATUS_LABELS[s], counts[s]) for s in STATUSES]]:
         cls = 'filter active' if s == current else 'filter'
-        filters += f'<a class="{cls}" href="/?status={s}">{label}</a>'
+        filters += f'<a class="{cls}" href="/?status={s}">{label} ({n})</a>'
 
     body = (
         '<table><thead><tr>'
@@ -99,14 +112,30 @@ button.done {{ background: #3b82f6; }}
 
 @app.get('/', response_class=HTMLResponse)
 def index(status: str = 'all', _user: str = Depends(auth)):
-    filter_status = None if status == 'all' else status
-    reports = list_reports(filter_status)
-    return HTMLResponse(render(reports, status))
+    if status != 'all' and status not in STATUSES:
+        raise HTTPException(400, 'Bad status')
+    reports = list_reports(None if status == 'all' else status)
+    return HTMLResponse(render(reports, status, count_by_status()))
+
+
+def _same_origin(request: Request) -> bool:
+    """Basic Auth браузер подставляет сам, поэтому POST с чужого сайта прошёл бы — режем по Origin."""
+    origin = request.headers.get('origin') or request.headers.get('referer')
+    return origin is None or urlparse(origin).netloc == request.headers.get('host')
 
 
 @app.post('/update/{report_id}/{new_status}')
-def update(report_id: str, new_status: str, _user: str = Depends(auth)):
+async def update(report_id: str, new_status: str, request: Request, _user: str = Depends(auth)):
+    if not _same_origin(request):
+        raise HTTPException(403, 'Cross-origin request')
     if new_status not in STATUSES:
         raise HTTPException(400, 'Bad status')
-    update_status(report_id, new_status)
+    report = get_report(report_id)
+    if report is None:
+        raise HTTPException(404, 'Report not found')
+    if report['status'] != new_status:
+        update_status(report['id'], new_status)
+        # анонимным обращениям (user_id NULL) уведомление не шлём
+        if report['user_id']:
+            await send_text(report['user_id'], status_changed_text(report['id'], new_status))
     return RedirectResponse('/', status_code=303)
