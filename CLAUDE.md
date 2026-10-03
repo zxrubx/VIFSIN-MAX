@@ -15,10 +15,12 @@
 bot/
 ├── main.py              # точка входа, polling
 ├── config.py            # читает .env (BOT_TOKEN, DB_PATH, ADMIN_*)
-├── db.py                # SQLite: init_db, create_report, list_reports, update_status
+├── db.py                # SQLite: init_db, create_report, get_report, list_reports, count_by_status, update_status
+├── notify.py            # send_text — личные сообщения (уведомления об изменении статуса)
 └── handlers/
-    ├── start.py         # /start, /help
-    └── feedback.py      # /report — FSM: категория → описание → контакт
+    ├── start.py         # /start, /help, /privacy
+    ├── feedback.py      # /report (FSM), /status ID, /cancel, лимит в час
+    └── fallback.py      # ответ на непонятные сообщения (регистрируется ПОСЛЕДНИМ)
 
 admin/
 └── app.py               # FastAPI: список обращений, фильтр по статусу, действия
@@ -33,7 +35,7 @@ data/                    # SQLite БД (создаётся автоматиче�
 | Поле | Тип | Описание |
 |---|---|---|
 | `id` | TEXT PK | 8-символьный hex (например `A3F9B21C`) |
-| `user_id` | INTEGER | MAX user_id отправителя |
+| `user_id` | INTEGER NULL | MAX user_id автора; **NULL для анонимных** (контакт `-`) — они не хранятся и не получают уведомлений |
 | `category` | TEXT | одна из 5 категорий (см. `db.CATEGORIES`) |
 | `description` | TEXT | текст обращения |
 | `contact_info` | TEXT NULL | контакт или NULL (анонимно) |
@@ -47,7 +49,7 @@ data/                    # SQLite БД (создаётся автоматиче�
 
 `/report` → inline-кнопки с категориями → `MemoryContext` ставит state `report_description` → пользователь шлёт текст → state `report_contact` → пользователь шлёт контакт или `-` → запись в БД, ID возвращается пользователю.
 
-`/cancel` сбрасывает состояние на любом шаге.
+`/cancel` сбрасывает состояние на любом шаге. `/status ID` — статус по ID. При смене статуса в админке автору с `user_id` уходит личное сообщение (admin вызывает `bot.notify.send_text`).
 
 ## Запуск
 
@@ -63,7 +65,11 @@ python -m bot.main
 # админка (отдельный процесс)
 uvicorn admin.app:app --host 127.0.0.1 --port 8000
 # открыть http://127.0.0.1:8000  (логин admin, пароль из ADMIN_PASSWORD)
+
+pytest                     # тесты (БД подменяется на временную)
 ```
+
+Python 3.10+ (maxapi). Админка не стартует со слабым `ADMIN_PASSWORD`.
 
 ## Аутентификация и URL MAX API
 
@@ -116,5 +122,6 @@ async def step(event: MessageCreated, context: MemoryContext):
 ## Важные нюансы
 - Polling и вебхуки несовместимы — `bot.delete_webhook()` вызывается перед `start_polling`
 - В админке используется HTTP Basic Auth (один пользователь `admin` + пароль из env). Для multi-user — добавить полноценные сессии
+- Бота в MAX может создать только самозанятый/ИП/юрлицо РФ, физлицо нельзя (см. README)
 - БД-файл создаётся в `data/reports.db` при первом запуске
 - `RequestGeoLocationButton` и кнопка типа `chat` нестабильны на стороне MAX API

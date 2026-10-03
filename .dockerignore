@@ -1,0 +1,6 @@
+venv
+references
+data
+.env
+.git
+tests
